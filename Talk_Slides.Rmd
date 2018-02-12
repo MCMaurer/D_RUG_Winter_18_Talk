@@ -1,0 +1,441 @@
+---
+title: "Avoid the R-oot of All Evil"
+subtitle: "Premature Optimization"
+author: "Michael Culshaw-Maurer"
+date: "1/31/2018"
+output: ioslides_presentation
+incremental: true
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(profvis)
+library(rio)
+library(microbenchmark)
+library(feather)
+library(compiler)
+library(ggthemes)
+library(ggExtra)
+library(memoise)
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+## A Little Scenario
+
+>- Your script takes 30 minutes to run
+>- You can only go get coffee so many times in a day 
+>- You remember "someone told me for loops are slow"
+>- You take a half a day to get rid of them all
+>- Now your script takes 29 minutes and 55 seconds to run
+>- You fling your coffee at the wall of your office
+
+## A Similar Scenario
+>- Your bike feels sluggish on your way to work
+>- You remember "someone told me carbon components make your bike lighter"
+>- You buy expensive carbon components
+>- Your bike still feels slow
+>- Your brake pads have been rubbing on your wheels
+
+## Wisdom from Donald {.build}
+
+Donald Knuth, creator of TeX and general computer science titan, once gave some sound advice:
+
+
+> "The real problem is that programmers have spent far too much time
+> worrying about efficiency in the wrong places and at the wrong times; 
+> **premature optimisation is the root of all evil** (or at least most of it) 
+> in programming."
+
+
+<div class="notes">
+
+- Many of us wouldn't consider ourselves programmers
+- But many of us are still guilty of this programming sin
+
+</div>
+
+## Ground We'll Cover Today {.build}
+>- So many topics to cover, so I'll go for breadth, not depth (this isn't an `apply` tutorial)
+>- I'll try to arm you with tools to optimize strategically
+>- I'll also hit some low-hanging fruit that apply across contexts
+>- Remember, R is really broad and flexible, so it's my way or one of a hundred highways
+>- Also there are lots of puns
+
+## Getting the Lay of the Land
+>- First thing we want to do is figure out our optimization targets
+>- R has a built-in feature, `Rprof()`
+>- However, `Rprof()` is evil
+>- Not really, it's just hard to use
+
+## A Savior! {.build}
+Meet your new best friend, `profvis()`
+
+```{r, echo=T}
+first_profile <- profvis({
+times <- 4e5
+cols <- 150
+data <- as.data.frame(x = matrix(rnorm(times * cols, mean = 5), ncol = cols))
+data <- cbind(id = paste0("g", seq_len(times)), data)
+data1 <- data
+means <- apply(data1[, names(data1) != "id"], 2, mean)
+for (i in seq_along(means)) {
+  data1[, names(data1) != "id"][, i] <- data1[, names(data1) != "id"][, i] - means[i]
+}
+}, height = "400px")
+```
+
+## `profvis()` results
+
+```{r, out.width = "400px"}
+first_profile
+```
+
+## RStudio Built-In {.build}
+
+>- In RStudio, you can use a built-in feature
+>- Select some lines of code, then go up to the Profile drop-down menu up top (between Debug and Tools)
+>- Use "Profile Selected Lines"
+
+## Finer-Scale Timing {.build}
+>- `microbenchmark` is a nice way to check speeds of several similar functions
+>- It will run many times, since results are stochastic
+
+```{r, echo=T, message=F, cache=T}
+microbenchmark(
+import("AllYearsTeamRatings.csv"),
+read_csv("AllYearsTeamRatings.csv"),
+read.csv("AllYearsTeamRatings.csv"))
+```
+
+## PassI/Onate About Speed
+>- As our previous results show, import speeds can vary a lot
+>- Input/Output (I/O) can be a bottleneck sometimes
+>- `rio` package is smart, picks fastest function based on file type
+>- `import()` and `export()` automatically detect file extension
+>- Consider using a different file extension for data you'll be using within a computing environment
+
+## CSV vs. feather {.build}
+```{r, echo=T, message=F, cache=T}
+data <- data.frame(rnorm(100000))
+microbenchmark(write_csv(data, "test_file.csv"),
+               write_feather(data, "test_file.feather"))
+```
+
+## CSV vs. feather {.build}
+```{r, echo=T, message=F, cache=T}
+microbenchmark(read_csv("test_file.csv"),
+               read_feather("test_file.feather"))
+```
+
+## How to Make Your Code Fast {.build}
+
+```{r, out.width = "800px", cache=T}
+knitr::include_graphics("fifty_ways.jpg")
+```
+
+## Poor, Misunderstood `for` Loops
+>- Often the first thing to get picked on
+>- They aren't always as bad as people say
+>- They're often poorly used, but *it's not their fault!*
+
+## What Actually Makes a Loop Slow? {.build}
+>- Here's a stupid example:
+```{r, cache=T, eval=F, echo=T}
+microbenchmark({
+  A <- 0
+  for (i in 1:10000){
+    10
+    A = A + 1
+  }
+},
+{
+  A <- 0
+  for (i in 1:10000){
+    ((((((10))))))
+    A = A + 1
+  }
+})
+```
+
+## What Actually Makes a Loop Slow? {.build}
+
+```{r, cache=T}
+microbenchmark({
+  A <- 0
+  for (i in 1:10000){
+    10
+    A = A + 1
+  }
+},
+{
+  A <- 0
+  for (i in 1:10000){
+    ((((((10))))))
+    A = A + 1
+  }
+})
+```
+>- Remember, in R, **everything** is a function call (or an object)
+>- `2 + 3` is actually `+(2,3)`, the function `+` with arguments `2` and `3`
+>- `(` itself is a function, so using a bunch of them results in lots of function calls and lookups
+>- Lots of calls in a loop = way more calls in total
+
+## What Actually Makes a Loop Slow? {.build}
+>- `for` loops are slow when written inefficiently
+>- Memory pre-allocation helps a lot
+>- Do as much as possible outside the loop (also true for `*apply`)
+>- Don't avoid loops just to avoid loops
+
+## `*apply` yourself {.build}
+>- Fiery debate over whether `*apply` functions are anything more than "syntactic sugar"
+>- They **contain loops**, but avoid some overhead and sometimes use faster C code
+>- Truly vectorized code, like `colMeans()` loops through values in the underlying C/FORTRAN code, which is what makes it so fast
+
+## `*apply` yourself {.build}
+
+>- Comparing an inefficient, vector-growing `for` loop to `vapply`
+```{r, echo=T}
+loop_square <- function(i){
+  results <- NA
+  for (i in seq_along(x)) results[i] <- x[i]^2
+  return(results)
+}
+```
+
+```{r}
+x <- rnorm(10000)
+microbenchmark(loop_square(x), vapply(x, function(z) z^2, FUN.VALUE = numeric(1)))
+```
+
+## `*apply` yourself {.build}
+
+>- Comparing a more efficient `for` loop to `vapply`
+```{r, echo=T}
+loop_square <- function(i){
+  results <- vector(mode = "double", length = length(x))
+  for (i in seq_along(x)) results[i] <- x[i]^2
+  return(results)
+}
+```
+
+```{r}
+x <- rnorm(10000)
+microbenchmark(loop_square(x), vapply(x, function(z) z^2, FUN.VALUE = numeric(1)))
+```
+
+## `*apply` yourself {.build}
+>- Another big benefit is that lots of packages that deal with parallel computing in R include parallelized `apply` functions
+>- `mclapply()` from `parallel` package is an example of this
+>- Always remember, `apply` will never beat real vectorized base functions, like `^`
+```{r}
+x <- rnorm(1000)
+microbenchmark(x^2, vapply(x, function(z) z^2, FUN.VALUE = numeric(1)), loop_square(x))
+```
+
+
+## Cache Me If You Can {.build}
+
+>- `memoise` package can cache answers to a function
+>- If you call the function with the same inputs, it'll remember the old answer
+
+```{r, echo=T}
+fib <- function(n) {
+  if (n < 2) {
+    return(n)
+  } else {
+    return(fib(n-1) + fib(n-2))
+  }
+}
+```
+
+## Cache Me If You Can
+
+```{r, echo=T}
+system.time(x <- fib(25))
+system.time(z <- fib(30))
+```
+
+## Cache Me If You Can {.build}
+
+>- Now let's `memoise` the function and look at how speed changes
+```{r, echo=T}
+fib_mem <- memoise(fib)
+system.time(a <- fib_mem(30))
+system.time(b <- fib_mem(30))
+```
+
+## Cache Me If You Can {.build}
+
+>- A few potential uses:
+>- You're running a Shiny app and want to store results in case the user selects the same inputs again
+>- You're applying a function over a dataset where you expect many similar inputs
+>- You're working on a script and want to save results of some slow calls (similar to caching chunks in RMarkdown)
+>- Tradeoff here is speed vs. memory
+
+## Cache Me If You Can {.build}
+
+>- Very dangerous if you're doing some sort of randomization
+
+```{r, echo=T}
+rnorm_plus1 <- function(x) {
+  rnorm(x)+1
+}
+x <- rnorm_plus1(10)
+y <- rnorm_plus1(10)
+all.equal(x,y)
+
+rp1_mem <- memoise(rnorm_plus1)
+x <- rp1_mem(10)
+y <- rp1_mem(10)
+all.equal(x,y)
+```
+
+
+## Take a Big Ole Byte (Compiler) {.build}
+
+>- R is interpreted, not compiled when it's run
+>- Just-In-Time compiler compiles your code into bytecode, "just in time" to be run
+>- If you're running R 3.3 or earlier, JIT compiler is not turned on by default
+>- In R 3.4, JIT is turned on by default
+>- value passed to `enableJIT()` changes how many types of functions get compiled (3 is the most)
+
+## Take a Big Ole Byte (Compiler) {.build}
+>- Here we're comparing `enableJIT(3)` to `enableJIT(0)`
+>- The (boring) function that we create will get used 100 times
+
+```{r}
+microbenchmark({
+  enableJIT(3)
+  f <- function(n, x) for (i in 1:n) x = (1 + x)^(-1)
+  for(i in 1:100) f(1000,1)
+},
+{
+  enableJIT(0)
+  f <- function(n, x) for (i in 1:n) x = (1 + x)^(-1)
+  for(i in 1:100) f(1000,1)
+}, times = 50)
+```
+
+## Take a Big Ole Byte (Compiler) {.build}
+>- Same comparison, but the function we create is only getting used once
+
+```{r}
+microbenchmark({
+  enableJIT(3)
+  f <- function(n, x) for (i in 1:n) x = (1 + x)^(-1)
+  f(1000,1)
+},
+{
+  enableJIT(0)
+  f <- function(n, x) for (i in 1:n) x = (1 + x)^(-1)
+  f(1000,1)
+}, times = 50)
+```
+
+>- If a function only gets called once, compiling it can bring overhead costs
+
+## Take a Big Ole Byte (Compiler) {.build}
+
+>- Be careful though, JIT compiler is turned to 3 by default in R 3.4, and sometimes JIT can be slower
+>- These are results from an Integral Projection Model script
+
+## Take a Big Ole Byte (Compiler)
+```{r, message=F}
+jit_test3 <- import("jit_test_3.csv")
+jit_test3 <- t(jit_test3)
+jit_test <- as.data.frame(jit_test3)
+rownames(jit_test) <- NULL
+colnames(jit_test)[1] <- "Seconds"
+jit_test$JitValue <- c(0,3,0,3,0,3)
+jit_test %>% ggplot(aes(x=as.factor(JitValue), y=Seconds))+
+  geom_point()+
+  theme_tufte()+
+  xlab("enableJIT() value")
+```
+
+## Take a Big Ole Byte (Compiler) {.build}
+>- You can also compile individual functions with `cmpfun`
+```{r}
+enableJIT(0)
+```
+
+```{r, echo=T}
+x <- rnorm(10000)
+ls_pre_compile <- cmpfun(loop_square)
+```
+
+```{r}
+results <- microbenchmark(loop_square(x), ls_pre_compile(x))
+results
+```
+
+## Take a Big Ole Byte (Compiler) {.build}
+
+>- What if we take the compilation time into consideration?
+```{r}
+results <- microbenchmark({
+  ls_compile <- cmpfun(loop_square) 
+  ls_compile(x)
+  }, loop_square(x), ls_pre_compile(x))
+results
+```
+
+>- It's faster even if you include the compilation step!
+>- Some functions benefit more from compiling than others
+>- Individual compilation may not make much of a difference in R 3.4, where `enableJIT(3)` is the default
+
+## It's My Computer's Fault {.build}
+>- Sometimes an excuse, sometimes true
+>- [Benchmarking scripts](http://r.research.att.com/benchmarks/) to see how fast your computer is
+>- `benchmarkme` package, `benchmark_std()` function
+>- Virtual machines through [Google](https://cloud.google.com/compute/) or [Amazon](https://aws.amazon.com/free/)
+>- Don't sell the [FARM](https://wiki.cse.ucdavis.edu/support/systems/farm)
+>- Buy more RAM (if you can)
+
+## Put Your Matrices on BLASt {.build}
+>- BLAS = Basic Linear Algebra Subprograms
+>- CRAN gives a universal, solid one
+>- Others are optimized for certain computers
+>- You can figure out what BLAS library you're using with this function:
+```{r, tidy=T, echo=T, eval=F}
+library(benchmarkme)
+get_linear_algebra()
+```
+>- [Here's how to change yours on a Mac](https://gist.github.com/zachmayer/e591cf868b3a381a01d6#file-veclib-sh)
+
+## R-ecipe For Success {.build}
+>- First do the one-time low-hanging fruit (BLAS)
+>- Profile your code, identify targets AND speed goals
+>- Decide which targets are worth the work/learning to fix
+>- Test some alternatives, use benchmarking/profiling
+>- Keep your old versions for future reference
+>- For goodness sake, **use base functions**
+
+**Remember- being strategic and disciplined is good, but nobody is perfect, and experimentation/playing around can be an important part of learning**
+
+## Things to Keep in Mind {.build}
+>- How much you'll use your code
+>- How bad is the learning curve
+>- How much time you have as a researcher
+>- R is not a fast language
+
+**If you're crunched for time, learning a new method will take a while, and you'll never use this script again, why optimize it?**
+
+## Credit Where It's Due {.build}
+
+I got a lot of the information from these sources, among others:
+
+[Efficient R Programming by Colin Gillespie](https://csgillespie.github.io/efficientR/index.html):
+This book covers a **HUGE** range of topics and is really well written.
+
+[Noam's D-RUG talk from 2013](https://d-rug.github.io/blog/2013/faster-talk) and [his blog post on vectorization](http://www.noamross.net/blog/2014/4/16/vectorization-in-r--why.html)
+
+[Hadley Wickham's Advanced R](http://adv-r.had.co.nz/):
+I particularly used the [Performance](http://adv-r.had.co.nz/Performance.html) and [Profiling](http://adv-r.had.co.nz/Profiling.html) chapters
+
+[An Article on For Loops in an R Newsletter From 2008](https://www.r-project.org/doc/Rnews/Rnews_2008-1.pdf)
+
+[Lots](https://stackoverflow.com/questions/28983292/is-the-apply-family-really-not-vectorized) [of](https://stackoverflow.com/questions/2275896/is-rs-apply-family-more-than-syntactic-sugar) [Stack](https://stackoverflow.com/questions/7142767/why-are-loops-slow-in-r) [Overflow](https://stackoverflow.com/questions/5533246/why-is-apply-method-slower-than-a-for-loop-in-r?noredirect=1&lq=1)
+
+[R Inferno by Patrick Burns](https://www.burns-stat.com/pages/Tutor/R_inferno.pdf):
+If you want to slowly descend into infernal torment of R knowledge, really dig into this book
